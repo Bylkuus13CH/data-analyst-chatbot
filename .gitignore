@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+plots/
+data/current_dataset.pkl
+.DS_Store
