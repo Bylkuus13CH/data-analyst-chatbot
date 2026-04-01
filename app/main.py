@@ -31,6 +31,24 @@ DATASTORE = {"df": None}
 DATASET_PICKLE_PATH = os.path.join("data", "current_dataset.pkl")
 
 
+def read_csv_with_fallback(content: bytes) -> pd.DataFrame:
+    # Essaie plusieurs encodages pour eviter les erreurs utf-8 frequentes.
+    encodings = ["utf-8", "cp1252", "latin1"]
+    last_error = None
+    for enc in encodings:
+        try:
+            return pd.read_csv(BytesIO(content), encoding=enc)
+        except UnicodeDecodeError as e:
+            last_error = e
+    raise UnicodeDecodeError(
+        "csv",
+        content,
+        0,
+        1,
+        f"Impossible de decoder le CSV avec encodages testes: {encodings}. Derniere erreur: {last_error}",
+    )
+
+
 def get_current_df():
     # 1) Priorité à la mémoire (plus rapide).
     df = DATASTORE.get("df")
@@ -103,6 +121,17 @@ def detect_aggregation_operation(question_norm: str):
     return None
 
 
+def parse_top_query(question_norm: str):
+    # Détecte un motif simple de type "top 3" ou "bottom 5".
+    # Renvoie (direction, n) où direction ∈ {"top", "bottom"}.
+    m = re.search(r"\b(top|bottom)\s+(\d+)\b", question_norm)
+    if not m:
+        return None
+    direction = m.group(1)
+    n = max(1, min(int(m.group(2)), 1000))
+    return direction, n
+
+
 def save_plot(x_values, y_values, x_label: str, y_label: str, chart_type: str):
     # Validation du type pour éviter les valeurs arbitraires.
     if chart_type not in {"bar", "line"}:
@@ -148,7 +177,7 @@ async def upload_file(file: UploadFile = File(...)):
     # Lecture du fichier selon son format.
     try:
         if ext == "csv":
-            df = pd.read_csv(BytesIO(content))
+            df = read_csv_with_fallback(content)
         elif ext in {"xlsx", "xls"}:
             df = pd.read_excel(BytesIO(content))
         else:
@@ -206,8 +235,51 @@ def ask_data(question_request: QuestionRequest):
     if "colon" in q_norm and ("combien" in q_norm or "nombre" in q_norm):
         return {"answer": f"Le dataset contient {len(df.columns)} colonnes."}
 
+    # Cas: lister les colonnes.
+    if ("colonne" in q_norm or "colonnes" in q_norm) and (
+        "liste" in q_norm or "quelles" in q_norm or "affiche" in q_norm or "montre" in q_norm
+    ):
+        numeric = df.select_dtypes(include="number").columns.tolist()
+        categorical = df.select_dtypes(exclude="number").columns.tolist()
+        return {
+            "answer": "Voici les colonnes disponibles.",
+            "columns": df.columns.tolist(),
+            "numeric_columns": numeric,
+            "categorical_columns": categorical,
+        }
+
     # Colonnes numériques pour les calculs.
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
+
+    # Cas: valeurs manquantes (global ou par colonne).
+    if "manqu" in q_norm or "null" in q_norm or "vide" in q_norm:
+        found_cols = detect_columns_in_question(df, q)
+        if found_cols:
+            col = found_cols[0]
+            missing = int(df[col].isna().sum())
+            return {"answer": f"La colonne '{col}' contient {missing} valeurs manquantes."}
+
+        missing_per_col = {
+            col: int(cnt) for col, cnt in df.isna().sum().items() if int(cnt) > 0
+        }
+        return {
+            "answer": f"Le dataset contient {int(df.isna().sum().sum())} valeurs manquantes au total.",
+            "missing_by_column": missing_per_col,
+        }
+
+    # Cas: top/bottom N sur une colonne numérique.
+    top_query = parse_top_query(q_norm)
+    if top_query:
+        direction, n = top_query
+        chosen_col = first_numeric_column_from_question(df, q)
+        if not chosen_col:
+            return {"answer": "Aucune colonne numerique trouvee pour faire un top/bottom."}
+        ascending = direction == "bottom"
+        result = df.sort_values(by=chosen_col, ascending=ascending).head(n)
+        return {
+            "answer": f"{direction.upper()} {n} lignes sur '{chosen_col}'.",
+            "data": result.to_dict(orient="records"),
+        }
 
     # Cas: opérations d'agrégation (moyenne, mediane, somme, min, max).
     aggregation = detect_aggregation_operation(q_norm)
@@ -244,7 +316,11 @@ def ask_data(question_request: QuestionRequest):
 
     # Cas par défaut si question non reconnue.
     return {
-        "answer": "Question non reconnue. Essaie: 'combien de lignes', 'combien de colonnes', 'moyenne', 'somme', 'minimum', 'maximum'."
+        "answer": (
+            "Question non reconnue. Essaie: 'combien de lignes', 'combien de colonnes', "
+            "'liste des colonnes', 'moyenne', 'somme', 'minimum', 'maximum', "
+            "'valeurs manquantes', 'top 3 ventes'."
+        )
     }
 
 
@@ -328,6 +404,19 @@ def ask_plot(payload: PlotQuestionRequest):
 
     # Détection simple du type de graphe.
     chart_type = "line" if ("courbe" in q_norm or "line" in q_norm) else "bar"
+
+    # Si X est catégorielle et Y numérique, agrège pour éviter les doublons visuels.
+    if x_col not in numeric_cols and y_col in numeric_cols:
+        op = detect_aggregation_operation(q_norm)
+        agg_method = op[1] if op else "sum"
+        grouped = df.groupby(x_col, dropna=False)[y_col].agg(agg_method).reset_index()
+        return save_plot(
+            x_values=grouped[x_col],
+            y_values=grouped[y_col],
+            x_label=x_col,
+            y_label=y_col,
+            chart_type=chart_type,
+        )
 
     # Réutilise l'endpoint /plot pour ne pas dupliquer la logique.
     return create_plot(PlotRequest(x_col=x_col, y_col=y_col, chart_type=chart_type))
