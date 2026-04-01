@@ -1,0 +1,9 @@
+region,produit,ventes,prix,quantite
+Nord,Clavier,1200,49.9,24
+Sud,Souris,800,19.9,40
+Est,Ecran,1500,199.9,8
+Ouest,Casque,950,79.9,12
+Nord,Souris,700,18.9,35
+Sud,Clavier,1100,52.0,21
+Est,Casque,600,74.5,9
+Ouest,Ecran,1300,189.0,7
