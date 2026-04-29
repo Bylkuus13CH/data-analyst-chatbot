@@ -3,36 +3,73 @@ import os
 import re
 import unicodedata
 import uuid
+from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")  # backend non-GUI pour serveur/API
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.staticfiles import StaticFiles
+from openai import OpenAI
 from pydantic import BaseModel
 
 
-# On crée les dossiers utiles au démarrage.
-# - plots: stockage des images générées
-# - data: stockage du dataset sérialisé pour survivre aux reloads
-os.makedirs("plots", exist_ok=True)
-os.makedirs("data", exist_ok=True)
+PLOTS_DIR = Path("plots")
+DATA_DIR = Path("data")
+DATASETS_DIR = DATA_DIR / "datasets"
+DATASET_PICKLE_PATH = DATA_DIR / "current_dataset.pkl"
+MAX_PLOTS = int(os.getenv("PLOTS_MAX_FILES", "100"))
+
+PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DATASETS_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Data Analyst Chatbot API")
+app.mount("/plots", StaticFiles(directory=str(PLOTS_DIR)), name="plots")
 
-# Permet d'accéder aux images via /plots/<nom_fichier>.png
-app.mount("/plots", StaticFiles(directory="plots"), name="plots")
+DATASTORE: dict[str, dict | str | None] = {
+    "datasets": {},
+    "active_dataset_id": None,
+}
 
-# Stockage temporaire en mémoire du DataFrame courant.
-DATASTORE = {"df": None}
 
-# Sauvegarde disque du dernier dataset chargé.
-DATASET_PICKLE_PATH = os.path.join("data", "current_dataset.pkl")
+class QuestionRequest(BaseModel):
+    question: str
+    dataset_id: str | None = None
+
+
+class PlotRequest(BaseModel):
+    x_col: str
+    y_col: str
+    chart_type: str = "bar"
+    dataset_id: str | None = None
+
+
+class PlotQuestionRequest(BaseModel):
+    question: str
+    dataset_id: str | None = None
+
+
+class LLMQuestionRequest(BaseModel):
+    question: str
+    model: str | None = None
+    dataset_id: str | None = None
+
+
+class DescribeRequest(BaseModel):
+    column: str
+    dataset_id: str | None = None
+
+
+class TopRequest(BaseModel):
+    sort_by: str
+    n: int = 10
+    ascending: bool = False
+    dataset_id: str | None = None
 
 
 def read_csv_with_fallback(content: bytes) -> pd.DataFrame:
-    # Essaie plusieurs encodages pour eviter les erreurs utf-8 frequentes.
     encodings = ["utf-8", "cp1252", "latin1"]
     last_error = None
     for enc in encodings:
@@ -49,31 +86,51 @@ def read_csv_with_fallback(content: bytes) -> pd.DataFrame:
     )
 
 
-def get_current_df():
-    # 1) Priorité à la mémoire (plus rapide).
-    df = DATASTORE.get("df")
-    if df is not None:
-        return df
+def normalize_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", str(value))
+    ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return ascii_only.lower().strip()
 
-    # 2) Si mémoire vide (ex: reload), on recharge depuis le disque.
-    if os.path.exists(DATASET_PICKLE_PATH):
+
+def _dataset_path(dataset_id: str) -> Path:
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", dataset_id)
+    return DATASETS_DIR / f"{safe_id}.pkl"
+
+
+def set_current_df(df: pd.DataFrame, dataset_id: str | None = None) -> str:
+    ds_id = dataset_id or uuid.uuid4().hex[:12]
+    DATASTORE["datasets"][ds_id] = df
+    DATASTORE["active_dataset_id"] = ds_id
+    df.to_pickle(_dataset_path(ds_id))
+    df.to_pickle(DATASET_PICKLE_PATH)
+    return ds_id
+
+
+def get_current_df(dataset_id: str | None = None) -> pd.DataFrame | None:
+    selected_id = dataset_id or DATASTORE.get("active_dataset_id")
+    if selected_id:
+        mem_df = DATASTORE["datasets"].get(selected_id)
+        if mem_df is not None:
+            return mem_df
+
+        disk_path = _dataset_path(selected_id)
+        if disk_path.exists():
+            df = pd.read_pickle(disk_path)
+            DATASTORE["datasets"][selected_id] = df
+            DATASTORE["active_dataset_id"] = selected_id
+            return df
+
+    if DATASET_PICKLE_PATH.exists():
         df = pd.read_pickle(DATASET_PICKLE_PATH)
-        DATASTORE["df"] = df
+        fallback_id = selected_id or "default"
+        DATASTORE["datasets"][fallback_id] = df
+        DATASTORE["active_dataset_id"] = fallback_id
         return df
 
-    # 3) Aucun dataset disponible.
     return None
 
 
-def normalize_text(value: str) -> str:
-    # Normalise accents/casse pour un matching plus robuste.
-    normalized = unicodedata.normalize("NFKD", str(value))
-    ascii_only = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    return ascii_only.lower()
-
-
-def find_column_name(df: pd.DataFrame, target: str):
-    # Retrouve le vrai nom de colonne (insensible aux accents/casse).
+def find_column_name(df: pd.DataFrame, target: str) -> str | None:
     target_norm = normalize_text(target)
     for col in df.columns:
         if normalize_text(col) == target_norm:
@@ -81,37 +138,36 @@ def find_column_name(df: pd.DataFrame, target: str):
     return None
 
 
-def detect_columns_in_question(df: pd.DataFrame, question: str):
-    # Détecte les colonnes mentionnées dans la question (matching normalisé).
+def detect_columns_in_question(df: pd.DataFrame, question: str) -> list[str]:
     q_norm = normalize_text(question)
     found = []
     for col in df.columns:
         col_norm = normalize_text(col)
-        if col_norm and col_norm in q_norm:
+        if not col_norm:
+            continue
+        if re.search(rf"\b{re.escape(col_norm)}\b", q_norm):
             found.append(col)
     return found
 
 
-def first_numeric_column_from_question(df: pd.DataFrame, question: str):
-    # Choisit d'abord une colonne numérique mentionnée, sinon fallback sur la 1ère numérique.
+def first_numeric_column_from_question(df: pd.DataFrame, question: str) -> str | None:
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
     if not numeric_cols:
         return None
 
-    q_norm = normalize_text(question)
-    for col in numeric_cols:
-        if normalize_text(col) in q_norm:
+    detected = detect_columns_in_question(df, question)
+    for col in detected:
+        if col in numeric_cols:
             return col
+
     return numeric_cols[0]
 
 
 def detect_aggregation_operation(question_norm: str):
-    # Détecte l'opération d'agrégation demandée dans la question.
-    # Renvoie: (label_humain, methode_pandas) ou None.
     checks = [
-        ("moyenne", "mean", r"\bmoyenne\b"),
+        ("moyenne", "mean", r"\bmoyenne\b|\bavg\b|\baverage\b"),
         ("mediane", "median", r"\bmediane\b|\bmedian\b"),
-        ("somme", "sum", r"\bsomme\b|\btotal\b"),
+        ("somme", "sum", r"\bsomme\b|\btotal\b|\bsum\b"),
         ("minimum", "min", r"\bminimum\b|\bmin\b"),
         ("maximum", "max", r"\bmaximum\b|\bmax\b"),
     ]
@@ -122,23 +178,27 @@ def detect_aggregation_operation(question_norm: str):
 
 
 def parse_top_query(question_norm: str):
-    # Détecte un motif simple de type "top 3" ou "bottom 5".
-    # Renvoie (direction, n) où direction ∈ {"top", "bottom"}.
-    m = re.search(r"\b(top|bottom)\s+(\d+)\b", question_norm)
+    m = re.search(r"\b(top|bottom|haut|bas)\s+(\d+)\b", question_norm)
     if not m:
         return None
     direction = m.group(1)
+    normalized_direction = "top" if direction in {"top", "haut"} else "bottom"
     n = max(1, min(int(m.group(2)), 1000))
-    return direction, n
+    return normalized_direction, n
+
+
+def _cleanup_old_plots(limit: int):
+    files = sorted(PLOTS_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old_file in files[limit:]:
+        old_file.unlink(missing_ok=True)
 
 
 def save_plot(x_values, y_values, x_label: str, y_label: str, chart_type: str):
-    # Validation du type pour éviter les valeurs arbitraires.
     if chart_type not in {"bar", "line"}:
         raise HTTPException(status_code=400, detail="chart_type doit etre 'bar' ou 'line'.")
 
     filename = f"{uuid.uuid4().hex}.png"
-    filepath = os.path.join("plots", filename)
+    filepath = PLOTS_DIR / filename
 
     plt.figure(figsize=(8, 4))
     if chart_type == "line":
@@ -154,27 +214,26 @@ def save_plot(x_values, y_values, x_label: str, y_label: str, chart_type: str):
     plt.savefig(filepath)
     plt.close()
 
+    _cleanup_old_plots(MAX_PLOTS)
+
     return {
         "message": "Graphique genere avec succes",
-        "chart_path": filepath,
+        "chart_path": str(filepath),
         "chart_url": f"/plots/{filename}",
     }
 
 
 @app.get("/health")
 def health():
-    # Endpoint de vérification rapide.
     return {"status": "ok"}
 
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
-    # Récupère nom + extension du fichier envoyé.
     filename = file.filename or ""
     ext = filename.lower().split(".")[-1] if "." in filename else ""
     content = await file.read()
 
-    # Lecture du fichier selon son format.
     try:
         if ext == "csv":
             df = read_csv_with_fallback(content)
@@ -185,57 +244,33 @@ async def upload_file(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Erreur lecture fichier: {str(e)}")
 
-    # Sauvegarde en mémoire + disque.
-    DATASTORE["df"] = df
-    df.to_pickle(DATASET_PICKLE_PATH)
+    dataset_id = set_current_df(df)
 
-    # Retourne un résumé du dataset.
     return {
         "message": "Fichier charge avec succes",
         "filename": filename,
+        "dataset_id": dataset_id,
         "rows": int(df.shape[0]),
         "columns": int(df.shape[1]),
         "column_names": df.columns.tolist(),
     }
 
 
-class QuestionRequest(BaseModel):
-    # Requête pour /ask.
-    question: str
-
-
-class PlotRequest(BaseModel):
-    # Requête pour /plot (mode explicite).
-    x_col: str
-    y_col: str
-    chart_type: str = "bar"
-
-
-class PlotQuestionRequest(BaseModel):
-    # Requête pour /ask_plot (mode langage naturel).
-    question: str
-
-
 @app.post("/ask")
 def ask_data(question_request: QuestionRequest):
-    # Récupère le dataset courant.
-    df = get_current_df()
+    df = get_current_df(question_request.dataset_id)
     if df is None:
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
-    # Normalise la question.
     q = question_request.question
     q_norm = normalize_text(q)
 
-    # Cas: nombre de lignes.
     if "combien" in q_norm and ("ligne" in q_norm or "lignes" in q_norm):
         return {"answer": f"Le dataset contient {len(df)} lignes."}
 
-    # Cas: nombre de colonnes.
     if "colon" in q_norm and ("combien" in q_norm or "nombre" in q_norm):
         return {"answer": f"Le dataset contient {len(df.columns)} colonnes."}
 
-    # Cas: lister les colonnes.
     if ("colonne" in q_norm or "colonnes" in q_norm) and (
         "liste" in q_norm or "quelles" in q_norm or "affiche" in q_norm or "montre" in q_norm
     ):
@@ -248,10 +283,8 @@ def ask_data(question_request: QuestionRequest):
             "categorical_columns": categorical,
         }
 
-    # Colonnes numériques pour les calculs.
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
-    # Cas: valeurs manquantes (global ou par colonne).
     if "manqu" in q_norm or "null" in q_norm or "vide" in q_norm:
         found_cols = detect_columns_in_question(df, q)
         if found_cols:
@@ -259,15 +292,12 @@ def ask_data(question_request: QuestionRequest):
             missing = int(df[col].isna().sum())
             return {"answer": f"La colonne '{col}' contient {missing} valeurs manquantes."}
 
-        missing_per_col = {
-            col: int(cnt) for col, cnt in df.isna().sum().items() if int(cnt) > 0
-        }
+        missing_per_col = {col: int(cnt) for col, cnt in df.isna().sum().items() if int(cnt) > 0}
         return {
             "answer": f"Le dataset contient {int(df.isna().sum().sum())} valeurs manquantes au total.",
             "missing_by_column": missing_per_col,
         }
 
-    # Cas: top/bottom N sur une colonne numérique.
     top_query = parse_top_query(q_norm)
     if top_query:
         direction, n = top_query
@@ -281,12 +311,10 @@ def ask_data(question_request: QuestionRequest):
             "data": result.to_dict(orient="records"),
         }
 
-    # Cas: opérations d'agrégation (moyenne, mediane, somme, min, max).
     aggregation = detect_aggregation_operation(q_norm)
     if aggregation:
         op_label, op_method = aggregation
 
-        # Mode "par": agrégation groupée, ex: "somme des ventes par region".
         if "par" in q_norm:
             found_cols = detect_columns_in_question(df, q)
             group_col = next((c for c in found_cols if c not in numeric_cols), None)
@@ -306,7 +334,6 @@ def ask_data(question_request: QuestionRequest):
                 )
             }
 
-        # Mode simple: agrégation sur une seule colonne numérique.
         chosen_col = first_numeric_column_from_question(df, q)
         if not chosen_col:
             return {"answer": f"Aucune colonne numerique trouvee pour calculer une {op_label}."}
@@ -314,7 +341,6 @@ def ask_data(question_request: QuestionRequest):
         value = float(getattr(df[chosen_col], op_method)())
         return {"answer": f"La {op_label} de la colonne '{chosen_col}' est {value:.2f}."}
 
-    # Cas par défaut si question non reconnue.
     return {
         "answer": (
             "Question non reconnue. Essaie: 'combien de lignes', 'combien de colonnes', "
@@ -324,10 +350,52 @@ def ask_data(question_request: QuestionRequest):
     }
 
 
+@app.post("/chat_llm")
+def chat_llm(payload: LLMQuestionRequest):
+    df = get_current_df(payload.dataset_id)
+    if df is None:
+        raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="OPENAI_API_KEY manquante. Definis la variable d'environnement pour utiliser /chat_llm.",
+        )
+
+    model = payload.model or os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+
+    schema_info = ", ".join(f"{col} ({dtype})" for col, dtype in df.dtypes.items())
+    preview_records = df.head(8).to_dict(orient="records")
+
+    system_prompt = (
+        "Tu es un data analyst assistant. "
+        "Tu reponds en francais de facon claire et concise. "
+        "Tu te bases uniquement sur le contexte dataset fourni."
+    )
+    user_prompt = (
+        f"Schema colonnes: {schema_info}\n"
+        f"Apercu lignes: {preview_records}\n"
+        f"Question utilisateur: {payload.question}"
+    )
+
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.responses.create(
+            model=model,
+            input=[
+                {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
+                {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
+            ],
+        )
+        return {"answer": response.output_text, "model": model, "source": "openai"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur appel LLM: {str(e)}")
+
+
 @app.get("/schema")
-def get_schema():
-    # Donne une vue structurelle du dataset (utile pour debug/frontend).
-    df = get_current_df()
+def get_schema(dataset_id: str | None = Query(default=None)):
+    df = get_current_df(dataset_id)
     if df is None:
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
@@ -341,28 +409,28 @@ def get_schema():
 
 @app.post("/plot")
 def create_plot(payload: PlotRequest):
-    # Génération de graphique à partir de paramètres explicites.
-    df = get_current_df()
+    df = get_current_df(payload.dataset_id)
     if df is None:
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
-    # Validation des colonnes demandées.
-    if payload.x_col not in df.columns or payload.y_col not in df.columns:
+    x_col = find_column_name(df, payload.x_col)
+    y_col = find_column_name(df, payload.y_col)
+
+    if x_col is None or y_col is None:
         raise HTTPException(status_code=400, detail="Colonne x_col ou y_col introuvable.")
 
     return save_plot(
-        x_values=df[payload.x_col],
-        y_values=df[payload.y_col],
-        x_label=payload.x_col,
-        y_label=payload.y_col,
+        x_values=df[x_col],
+        y_values=df[y_col],
+        x_label=x_col,
+        y_label=y_col,
         chart_type=payload.chart_type,
     )
 
 
 @app.post("/ask_plot")
 def ask_plot(payload: PlotQuestionRequest):
-    # Génération de graphique à partir d'une question texte.
-    df = get_current_df()
+    df = get_current_df(payload.dataset_id)
     if df is None:
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
@@ -371,22 +439,17 @@ def ask_plot(payload: PlotQuestionRequest):
     cols = [c for c in df.columns]
     numeric_cols = df.select_dtypes(include="number").columns.tolist()
 
-    # Impossible de tracer Y sans colonne numérique.
     if not numeric_cols:
         raise HTTPException(status_code=400, detail="Aucune colonne numerique disponible pour tracer un graphique.")
 
-    # Détection simple des colonnes mentionnées dans la question.
     found_cols = detect_columns_in_question(df, q)
 
-    # Cas 1: au moins 2 colonnes détectées (x, y).
     if len(found_cols) >= 2:
         x_col = found_cols[0]
         y_col = found_cols[1]
-    # Cas 2: une seule colonne détectée.
     elif len(found_cols) == 1:
         only_col = found_cols[0]
         if only_col in numeric_cols:
-            # Si unique colonne numérique, on trace par index (sans muter le DataFrame).
             chart_type = "line" if ("courbe" in q_norm or "line" in q_norm) else "bar"
             return save_plot(
                 x_values=range(len(df)),
@@ -395,17 +458,13 @@ def ask_plot(payload: PlotQuestionRequest):
                 y_label=only_col,
                 chart_type=chart_type,
             )
-        else:
-            raise HTTPException(status_code=400, detail=f"La colonne '{only_col}' n'est pas numerique.")
-    # Cas 3: aucune colonne détectée -> fallback.
+        raise HTTPException(status_code=400, detail=f"La colonne '{only_col}' n'est pas numerique.")
     else:
         x_col = cols[0]
         y_col = numeric_cols[0]
 
-    # Détection simple du type de graphe.
     chart_type = "line" if ("courbe" in q_norm or "line" in q_norm) else "bar"
 
-    # Si X est catégorielle et Y numérique, agrège pour éviter les doublons visuels.
     if x_col not in numeric_cols and y_col in numeric_cols:
         op = detect_aggregation_operation(q_norm)
         agg_method = op[1] if op else "sum"
@@ -418,43 +477,15 @@ def ask_plot(payload: PlotQuestionRequest):
             chart_type=chart_type,
         )
 
-    # Réutilise l'endpoint /plot pour ne pas dupliquer la logique.
-    return create_plot(PlotRequest(x_col=x_col, y_col=y_col, chart_type=chart_type))
-
-# =========================================================
-# MODELES DE REQUETE (Body JSON) POUR LES NOUVEAUX ENDPOINTS
-# =========================================================
-
-class DescribeRequest(BaseModel):
-    # Nom de la colonne à analyser dans /describe
-    column: str
+    return create_plot(PlotRequest(x_col=x_col, y_col=y_col, chart_type=chart_type, dataset_id=payload.dataset_id))
 
 
-class TopRequest(BaseModel):
-    # Nom de la colonne utilisée pour trier les lignes
-    sort_by: str
-    # Nombre de lignes à retourner (défaut 10)
-    n: int = 10
-    # Sens du tri: False = du plus grand au plus petit, True = du plus petit au plus grand
-    ascending: bool = False
-
-
-# =========================================================
-# ENDPOINT: /columns
-# But: lister les colonnes du dataset par type
-# =========================================================
 @app.get("/columns")
-def get_columns():
-    # Récupère le dataset courant (mémoire ou disque via get_current_df)
-    df = get_current_df()
+def get_columns(dataset_id: str | None = Query(default=None)):
+    df = get_current_df(dataset_id)
     if df is None:
-        # Bloque l'appel si aucun upload n'a été fait
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
-    # Retourne:
-    # - toutes les colonnes
-    # - les colonnes numériques (int, float...)
-    # - les colonnes non numériques (texte, date, etc.)
     return {
         "columns": df.columns.tolist(),
         "numeric_columns": df.select_dtypes(include="number").columns.tolist(),
@@ -462,78 +493,59 @@ def get_columns():
     }
 
 
-# =========================================================
-# ENDPOINT: /describe
-# But: donner un résumé d'une colonne (stats + infos qualité)
-# =========================================================
 @app.post("/describe")
 def describe_column(payload: DescribeRequest):
-    # Récupère le dataset courant
-    df = get_current_df()
+    df = get_current_df(payload.dataset_id)
     if df is None:
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
-    # Vérifie que la colonne demandée existe
-    if payload.column not in df.columns:
+    column_name = find_column_name(df, payload.column)
+    if column_name is None:
         raise HTTPException(status_code=400, detail=f"Colonne introuvable: {payload.column}")
 
-    # Série pandas de la colonne demandée
-    series = df[payload.column]
+    series = df[column_name]
 
-    # Bloc d'infos commun (quel que soit le type de la colonne)
     result = {
-        "column": payload.column,                 # nom de la colonne
-        "dtype": str(series.dtype),              # type pandas
-        "count": int(series.count()),            # nb de valeurs non nulles
-        "missing": int(series.isna().sum()),     # nb de valeurs manquantes
-        "unique": int(series.nunique(dropna=True)),  # nb de valeurs distinctes
+        "column": column_name,
+        "dtype": str(series.dtype),
+        "count": int(series.count()),
+        "missing": int(series.isna().sum()),
+        "unique": int(series.nunique(dropna=True)),
     }
 
-    # Si la colonne est numérique: on calcule des stats de base
     if pd.api.types.is_numeric_dtype(series):
         has_values = series.count() > 0
         result.update(
             {
-                "mean": float(series.mean()) if has_values else None,  # moyenne
-                "min": float(series.min()) if has_values else None,    # minimum
-                "max": float(series.max()) if has_values else None,    # maximum
-                "sum": float(series.sum()) if has_values else None,    # somme
+                "mean": float(series.mean()) if has_values else None,
+                "min": float(series.min()) if has_values else None,
+                "max": float(series.max()) if has_values else None,
+                "sum": float(series.sum()) if has_values else None,
             }
         )
     else:
-        # Si non numérique: on renvoie les 10 valeurs les plus fréquentes
         top_values = series.value_counts(dropna=True).head(10)
         result["top_values"] = top_values.to_dict()
 
     return result
 
 
-# =========================================================
-# ENDPOINT: /top
-# But: trier le dataset sur une colonne et renvoyer les N premières lignes
-# =========================================================
 @app.post("/top")
 def top_rows(payload: TopRequest):
-    # Récupère le dataset courant
-    df = get_current_df()
+    df = get_current_df(payload.dataset_id)
     if df is None:
         raise HTTPException(status_code=400, detail="Aucun dataset charge. Upload d'abord un fichier.")
 
-    # Vérifie que la colonne de tri existe
-    if payload.sort_by not in df.columns:
+    sort_col = find_column_name(df, payload.sort_by)
+    if sort_col is None:
         raise HTTPException(status_code=400, detail=f"Colonne introuvable: {payload.sort_by}")
 
-    # Sécurise n pour éviter des réponses trop lourdes:
-    # min 1, max 1000
     n = max(1, min(payload.n, 1000))
+    sorted_df = df.sort_values(by=sort_col, ascending=payload.ascending).head(n)
 
-    # Tri puis extraction des n premières lignes
-    sorted_df = df.sort_values(by=payload.sort_by, ascending=payload.ascending).head(n)
-
-    # Réponse finale JSON
     return {
-        "sort_by": payload.sort_by,                  # colonne utilisée pour le tri
-        "ascending": payload.ascending,              # sens du tri
-        "n": int(n),                                 # n réellement utilisé
-        "data": sorted_df.to_dict(orient="records"),# lignes retournées
+        "sort_by": sort_col,
+        "ascending": payload.ascending,
+        "n": int(n),
+        "data": sorted_df.to_dict(orient="records"),
     }
