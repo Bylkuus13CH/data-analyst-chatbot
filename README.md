@@ -1,34 +1,39 @@
-# 🌌 AstrIA — Data Analyst Chatbot API
+# 🌌 AstrIA
 
-> Pose des questions en langage naturel sur tes données. Obtiens des stats, des schémas, des graphiques — instantanément.
+> Upload un CSV/Excel, pose des questions en langage naturel, génère des graphiques et obtiens des stats sur tes colonnes — via une API FastAPI + un front Streamlit.
 
 ---
 
-## ✨ Fonctionnalités
+## 🛠️ Stack
 
-| Endpoint | Description |
+| Composant | Rôle |
 |---|---|
-| 📤 `/upload` | Upload de fichier CSV / XLSX / XLS |
-| 🤖 `/ask` | Q&A rule-based sur le dataset |
-| 🧾 `/schema` | Résumé du schéma du dataset |
-| 🗂️ `/columns` | Colonnes triées par type |
-| 🔍 `/describe` | Description détaillée d'une colonne |
-| 🏆 `/top` | Tri Top N |
-| 📊 `/plot` | Graphiques explicites |
-| 💬 `/ask_plot` | Graphiques en langage naturel |
-| 🧠 `/chat_llm` | Chat OpenAI basé sur le dataset |
-| 📁 `/datasets` | Listing des datasets chargés |
+| 🐍 Python | Base |
+| ⚡ FastAPI | API backend |
+| 🎨 Streamlit | Interface front |
+| 🐼 Pandas | Manipulation des données |
+| 📊 Matplotlib | Génération de graphiques |
+| 🤖 OpenAI SDK | Optionnel — pour `/chat_llm` |
 
 ---
 
-## 🛠️ Prérequis
+## 📁 Structure du projet
 
-- 🐍 Python **3.11+**
-- 📦 `pip`
+```
+data-analyst-chatbot/
+├── app/main.py          → API FastAPI
+├── streamlit_app.py     → Interface Streamlit
+├── tests/test_api.py    → Tests API
+├── assets/              → Images du front
+├── data/                → Datasets sérialisés
+└── plots/               → Graphiques générés
+```
 
 ---
 
 ## 🚀 Installation
+
+Depuis le dossier `data-analyst-chatbot` :
 
 ```bash
 python3 -m venv .venv
@@ -38,22 +43,30 @@ pip install -r requirements.txt
 
 ---
 
-## ▶️ Lancer l'API
+## ▶️ Lancer l'application
+
+Lancer dans 2 terminaux séparés.
+
+**Terminal 1 — API :**
 
 ```bash
+cd /Users/nel/Chatbot/data-analyst-chatbot
+source ../.venv/bin/activate
 uvicorn app.main:app --reload
 ```
 
-🌐 API disponible sur `http://127.0.0.1:8000`
-
-## 🖥️ Lancer le front (Streamlit)
+**Terminal 2 — Front :**
 
 ```bash
+cd /Users/nel/Chatbot/data-analyst-chatbot
+source ../.venv/bin/activate
 streamlit run streamlit_app.py
 ```
 
-🎨 Front disponible sur `http://localhost:8501`
-Si le front affiche une erreur de connexion (`127.0.0.1:8000`), relance l'API FastAPI dans un autre terminal.
+🌐 **URLs :**
+- API → `http://127.0.0.1:8000`
+- Swagger → `http://127.0.0.1:8000/docs`
+- Front → `http://localhost:8501`
 
 ---
 
@@ -61,14 +74,42 @@ Si le front affiche une erreur de connexion (`127.0.0.1:8000`), relance l'API Fa
 
 | Variable | Requis | Défaut | Description |
 |---|---|---|---|
-| `OPENAI_API_KEY` | ✅ Oui | — | Obligatoire pour `/chat_llm` |
-| `OPENAI_MODEL` | ❌ Non | `gpt-4.1-mini` | Modèle OpenAI utilisé |
-| `PLOTS_MAX_FILES` | ❌ Non | `100` | Nombre max de fichiers de graphiques |
+| `OPENAI_API_KEY` | ⚠️ Pour `/chat_llm` | — | Clé API OpenAI |
+| `OPENAI_MODEL` | ❌ Non | `gpt-4.1-mini` | Modèle utilisé |
+| `PLOTS_MAX_FILES` | ❌ Non | `100` | Nb max de graphiques |
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 export OPENAI_MODEL="gpt-4.1-mini"
 export PLOTS_MAX_FILES=100
+```
+
+---
+
+## 🗺️ Flux d'utilisation rapide
+
+1. 🌐 Ouvre le front `http://localhost:8501`
+2. 📤 Upload un fichier CSV / XLSX
+3. 💬 Pose une question libre
+4. 📊 Demande un graphique
+5. 🔍 Utilise l'analyse de colonne si besoin
+
+---
+
+## 📡 Endpoints principaux
+
+```
+GET  /health
+POST /upload
+GET  /datasets
+POST /ask
+POST /ask_plot
+POST /plot
+GET  /schema
+GET  /columns
+POST /describe
+POST /top
+POST /chat_llm
 ```
 
 ---
@@ -81,62 +122,34 @@ python3 -m pytest -q
 
 ---
 
-## 📡 Exemples d'appels
+## 🔧 Dépannage
 
-### 🏥 Health check
+### ❌ Erreur `Connection refused` dans Streamlit
 
-```bash
-curl http://127.0.0.1:8000/health
-```
+**Cause :** API non lancée.
 
-### 📤 Upload
+**Solution :** relancer FastAPI dans un autre terminal :
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/upload" \
-  -F "file=@test_data.csv"
+uvicorn app.main:app --reload
 ```
 
-### 💬 Ask
+### ❌ Erreur "Aucune colonne numérique disponible"
 
-```bash
-curl -X POST "http://127.0.0.1:8000/ask" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"combien de lignes"}'
-```
+**Cause fréquente :** colonnes lues en texte (format CSV non standard).
 
-### 🔍 Describe
+**Vérifie avec :**
+- `GET /schema`
+- `GET /columns`
 
-```bash
-curl -X POST "http://127.0.0.1:8000/describe" \
-  -H "Content-Type: application/json" \
-  -d '{"column":"ventes"}'
-```
-
-### 📊 Ask Plot
-
-```bash
-curl -X POST "http://127.0.0.1:8000/ask_plot" \
-  -H "Content-Type: application/json" \
-  -d '{"question":"graphique des ventes par region"}'
-```
+Puis utilise les noms exacts des colonnes numériques dans ta question graphique.
 
 ---
 
-## 🗺️ Tous les endpoints
+## 📝 Remarques
 
-```
-GET  /health
-POST /upload
-GET  /datasets
-POST /ask
-POST /chat_llm
-GET  /schema
-GET  /columns
-POST /describe
-POST /top
-POST /plot
-POST /ask_plot
-```
+- `dataset_id` peut être laissé vide dans la plupart des cas — l'API utilise le dernier upload.
+- Les graphiques sont accessibles via les URLs `/plots/<fichier>.png`.
 
 ---
 
