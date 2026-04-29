@@ -1,4 +1,7 @@
+import os
+
 from fastapi.testclient import TestClient
+
 from app.main import app
 
 client = TestClient(app)
@@ -27,7 +30,15 @@ def test_upload():
     assert r.status_code == 200
     body = r.json()
     assert body["rows"] == 4
+    assert "dataset_id" in body
     assert "ventes" in body["column_names"]
+
+
+def test_upload_invalid_format():
+    files = {"file": ("sample.txt", "hello", "text/plain")}
+    r = client.post("/upload", files=files)
+    assert r.status_code == 400
+    assert "Format non supporte" in r.json()["detail"]
 
 
 def test_ask_lines():
@@ -37,6 +48,11 @@ def test_ask_lines():
     assert "4 lignes" in r.json()["answer"]
 
 
+def test_ask_without_dataset():
+    r = client.post("/ask", json={"question": "combien de lignes", "dataset_id": "does-not-exist"})
+    assert r.status_code == 400
+
+
 def test_describe_numeric():
     upload_sample_csv()
     r = client.post("/describe", json={"column": "ventes"})
@@ -44,6 +60,12 @@ def test_describe_numeric():
     body = r.json()
     assert body["column"] == "ventes"
     assert body["sum"] == 4450.0
+
+
+def test_describe_invalid_column():
+    upload_sample_csv()
+    r = client.post("/describe", json={"column": "inconnue"})
+    assert r.status_code == 400
 
 
 def test_top_rows():
@@ -62,3 +84,15 @@ def test_ask_plot():
     body = r.json()
     assert "chart_url" in body
     assert body["chart_url"].startswith("/plots/")
+
+
+def test_chat_llm_missing_key():
+    upload_sample_csv()
+    previous = os.environ.pop("OPENAI_API_KEY", None)
+    try:
+        r = client.post("/chat_llm", json={"question": "resume"})
+        assert r.status_code == 400
+        assert "OPENAI_API_KEY" in r.json()["detail"]
+    finally:
+        if previous:
+            os.environ["OPENAI_API_KEY"] = previous
