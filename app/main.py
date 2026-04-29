@@ -120,6 +120,9 @@ def get_current_df(dataset_id: str | None = None) -> pd.DataFrame | None:
             DATASTORE["active_dataset_id"] = selected_id
             return df
 
+        if dataset_id is not None:
+            return None
+
     if DATASET_PICKLE_PATH.exists():
         df = pd.read_pickle(DATASET_PICKLE_PATH)
         fallback_id = selected_id or "default"
@@ -165,7 +168,7 @@ def first_numeric_column_from_question(df: pd.DataFrame, question: str) -> str |
 
 def detect_aggregation_operation(question_norm: str):
     checks = [
-        ("moyenne", "mean", r"\bmoyenne\b|\bavg\b|\baverage\b"),
+        ("moyenne", "mean", r"\bmoyenne\b|\bmoy\b|\bavg\b|\baverage\b"),
         ("mediane", "median", r"\bmediane\b|\bmedian\b"),
         ("somme", "sum", r"\bsomme\b|\btotal\b|\bsum\b"),
         ("minimum", "min", r"\bminimum\b|\bmin\b"),
@@ -179,12 +182,26 @@ def detect_aggregation_operation(question_norm: str):
 
 def parse_top_query(question_norm: str):
     m = re.search(r"\b(top|bottom|haut|bas)\s+(\d+)\b", question_norm)
-    if not m:
+    if m:
+        direction = m.group(1)
+        normalized_direction = "top" if direction in {"top", "haut"} else "bottom"
+        n = max(1, min(int(m.group(2)), 1000))
+        return normalized_direction, n
+
+    m_fr = re.search(r"\b(\d+)\s+(plus\s+grands?|plus\s+hauts?|plus\s+petits?|plus\s+bas)\b", question_norm)
+    if not m_fr:
         return None
-    direction = m.group(1)
-    normalized_direction = "top" if direction in {"top", "haut"} else "bottom"
-    n = max(1, min(int(m.group(2)), 1000))
-    return normalized_direction, n
+
+    n = max(1, min(int(m_fr.group(1)), 1000))
+    label = m_fr.group(2)
+    direction = "bottom" if ("petit" in label or "bas" in label) else "top"
+    return direction, n
+
+
+def detect_chart_type(question_norm: str) -> str:
+    if any(token in question_norm for token in ["courbe", "line", "ligne"]):
+        return "line"
+    return "bar"
 
 
 def _cleanup_old_plots(limit: int):
@@ -445,12 +462,18 @@ def ask_plot(payload: PlotQuestionRequest):
     found_cols = detect_columns_in_question(df, q)
 
     if len(found_cols) >= 2:
-        x_col = found_cols[0]
-        y_col = found_cols[1]
+        numeric_in_found = [c for c in found_cols if c in numeric_cols]
+        non_numeric_in_found = [c for c in found_cols if c not in numeric_cols]
+        if numeric_in_found and non_numeric_in_found:
+            x_col = non_numeric_in_found[0]
+            y_col = numeric_in_found[0]
+        else:
+            x_col = found_cols[0]
+            y_col = found_cols[1]
     elif len(found_cols) == 1:
         only_col = found_cols[0]
         if only_col in numeric_cols:
-            chart_type = "line" if ("courbe" in q_norm or "line" in q_norm) else "bar"
+            chart_type = detect_chart_type(q_norm)
             return save_plot(
                 x_values=range(len(df)),
                 y_values=df[only_col],
@@ -463,7 +486,7 @@ def ask_plot(payload: PlotQuestionRequest):
         x_col = cols[0]
         y_col = numeric_cols[0]
 
-    chart_type = "line" if ("courbe" in q_norm or "line" in q_norm) else "bar"
+    chart_type = detect_chart_type(q_norm)
 
     if x_col not in numeric_cols and y_col in numeric_cols:
         op = detect_aggregation_operation(q_norm)
@@ -491,6 +514,14 @@ def get_columns(dataset_id: str | None = Query(default=None)):
         "numeric_columns": df.select_dtypes(include="number").columns.tolist(),
         "categorical_columns": df.select_dtypes(exclude="number").columns.tolist(),
     }
+
+
+@app.get("/datasets")
+def list_datasets():
+    in_memory_ids = list(DATASTORE["datasets"].keys())
+    on_disk_ids = [p.stem for p in DATASETS_DIR.glob("*.pkl")]
+    all_ids = sorted(set(in_memory_ids + on_disk_ids))
+    return {"active_dataset_id": DATASTORE.get("active_dataset_id"), "dataset_ids": all_ids}
 
 
 @app.post("/describe")

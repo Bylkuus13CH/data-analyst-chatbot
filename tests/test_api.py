@@ -86,6 +86,15 @@ def test_ask_plot():
     assert body["chart_url"].startswith("/plots/")
 
 
+def test_ask_top_frasing_plus_grands():
+    upload_sample_csv()
+    r = client.post("/ask", json={"question": "2 plus grands ventes"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "TOP 2" in body["answer"]
+    assert len(body["data"]) == 2
+
+
 def test_chat_llm_missing_key():
     upload_sample_csv()
     previous = os.environ.pop("OPENAI_API_KEY", None)
@@ -96,3 +105,12 @@ def test_chat_llm_missing_key():
     finally:
         if previous:
             os.environ["OPENAI_API_KEY"] = previous
+
+
+def test_list_datasets():
+    upload_sample_csv()
+    r = client.get("/datasets")
+    assert r.status_code == 200
+    body = r.json()
+    assert "dataset_ids" in body
+    assert len(body["dataset_ids"]) >= 1
