@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🌌 AstrIA
 
 > Upload un CSV/Excel, pose des questions en langage naturel, génère des graphiques et obtiens des stats sur tes colonnes — via une API FastAPI + un front Streamlit.
