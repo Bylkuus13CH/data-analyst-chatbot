@@ -1,25 +1,34 @@
-# Data Analyst Chatbot API
+# 🌌 AstrIA — Data Analyst Chatbot API
 
-API FastAPI pour charger un dataset (CSV/Excel), poser des questions en langage naturel, obtenir des stats et générer des graphiques.
+> Pose des questions en langage naturel sur tes données. Obtiens des stats, des schémas, des graphiques — instantanément.
 
-## Fonctionnalites
+---
 
-- Upload de fichier CSV/XLSX/XLS (`/upload`)
-- Q&A dataset rule-based (`/ask`)
-- Resume schema dataset (`/schema`)
-- Colonnes par type (`/columns`)
-- Description detaillee d'une colonne (`/describe`)
-- Tri top N (`/top`)
-- Graphiques explicites (`/plot`) et en langage naturel (`/ask_plot`)
-- Chat LLM OpenAI base sur le dataset (`/chat_llm`)
-- Listing des datasets charges (`/datasets`)
+## ✨ Fonctionnalités
 
-## Prerequis
+| Endpoint | Description |
+|---|---|
+| 📤 `/upload` | Upload de fichier CSV / XLSX / XLS |
+| 🤖 `/ask` | Q&A rule-based sur le dataset |
+| 🧾 `/schema` | Résumé du schéma du dataset |
+| 🗂️ `/columns` | Colonnes triées par type |
+| 🔍 `/describe` | Description détaillée d'une colonne |
+| 🏆 `/top` | Tri Top N |
+| 📊 `/plot` | Graphiques explicites |
+| 💬 `/ask_plot` | Graphiques en langage naturel |
+| 🧠 `/chat_llm` | Chat OpenAI basé sur le dataset |
+| 📁 `/datasets` | Listing des datasets chargés |
 
-- Python 3.11+
-- `pip`
+---
 
-## Installation
+## 🛠️ Prérequis
+
+- 🐍 Python **3.11+**
+- 📦 `pip`
+
+---
+
+## 🚀 Installation
 
 ```bash
 python3 -m venv .venv
@@ -27,21 +36,35 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Lancer l'API
+---
+
+## ▶️ Lancer l'API
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-API disponible sur `http://127.0.0.1:8000`
+🌐 API disponible sur `http://127.0.0.1:8000`
 
-## Variables d'environnement
+---
 
-- `OPENAI_API_KEY`: obligatoire pour `/chat_llm`
-- `OPENAI_MODEL`: optionnel, defaut `gpt-4.1-mini`
-- `PLOTS_MAX_FILES`: optionnel, defaut `100`
+## 🖥️ Lancer le front (Streamlit)
 
-Exemple:
+```bash
+streamlit run streamlit_app.py
+```
+
+🎨 Front disponible sur `http://localhost:8501`
+
+---
+
+## 🔑 Variables d'environnement
+
+| Variable | Requis | Défaut | Description |
+|---|---|---|---|
+| `OPENAI_API_KEY` | ✅ Oui | — | Obligatoire pour `/chat_llm` |
+| `OPENAI_MODEL` | ❌ Non | `gpt-4.1-mini` | Modèle OpenAI utilisé |
+| `PLOTS_MAX_FILES` | ❌ Non | `100` | Nombre max de fichiers de graphiques |
 
 ```bash
 export OPENAI_API_KEY="sk-..."
@@ -49,28 +72,32 @@ export OPENAI_MODEL="gpt-4.1-mini"
 export PLOTS_MAX_FILES=100
 ```
 
-## Tests
+---
+
+## 🧪 Tests
 
 ```bash
 python3 -m pytest -q
 ```
 
-## Exemples d'appels
+---
 
-### Health
+## 📡 Exemples d'appels
+
+### 🏥 Health check
 
 ```bash
 curl http://127.0.0.1:8000/health
 ```
 
-### Upload
+### 📤 Upload
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/upload" \
   -F "file=@test_data.csv"
 ```
 
-### Ask
+### 💬 Ask
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/ask" \
@@ -78,7 +105,7 @@ curl -X POST "http://127.0.0.1:8000/ask" \
   -d '{"question":"combien de lignes"}'
 ```
 
-### Describe
+### 🔍 Describe
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/describe" \
@@ -86,7 +113,7 @@ curl -X POST "http://127.0.0.1:8000/describe" \
   -d '{"column":"ventes"}'
 ```
 
-### Ask Plot
+### 📊 Ask Plot
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/ask_plot" \
@@ -94,16 +121,24 @@ curl -X POST "http://127.0.0.1:8000/ask_plot" \
   -d '{"question":"graphique des ventes par region"}'
 ```
 
-## Endpoints
+---
 
-- `GET /health`
-- `POST /upload`
-- `GET /datasets`
-- `POST /ask`
-- `POST /chat_llm`
-- `GET /schema`
-- `GET /columns`
-- `POST /describe`
-- `POST /top`
-- `POST /plot`
-- `POST /ask_plot`
+## 🗺️ Tous les endpoints
+
+```
+GET  /health
+POST /upload
+GET  /datasets
+POST /ask
+POST /chat_llm
+GET  /schema
+GET  /columns
+POST /describe
+POST /top
+POST /plot
+POST /ask_plot
+```
+
+---
+
+> 🌠 *AstrIA — Quand tes données rencontrent l'intelligence artificielle.*
