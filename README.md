@@ -46,8 +46,6 @@ uvicorn app.main:app --reload
 
 🌐 API disponible sur `http://127.0.0.1:8000`
 
----
-
 ## 🖥️ Lancer le front (Streamlit)
 
 ```bash
@@ -55,6 +53,7 @@ streamlit run streamlit_app.py
 ```
 
 🎨 Front disponible sur `http://localhost:8501`
+Si le front affiche une erreur de connexion (`127.0.0.1:8000`), relance l'API FastAPI dans un autre terminal.
 
 ---
 
